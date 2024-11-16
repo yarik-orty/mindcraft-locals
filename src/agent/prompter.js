@@ -12,7 +12,7 @@ import { ReplicateAPI } from '../models/replicate.js';
 import { Local } from '../models/local.js';
 import { GroqCloudAPI } from '../models/groq.js';
 import { HuggingFace } from '../models/huggingface.js';
-import { Qwen } from "../models/qwen.js";
+import { LlamaCpp } from '../models/llama-cpp.js';
 
 export class Prompter {
     constructor(agent, fp) {
@@ -23,6 +23,7 @@ export class Prompter {
         
         let name = this.profile.name;
         let chat = this.profile.model;
+        let baseURL = this.profile.url;
         this.cooldown = this.profile.cooldown ? this.profile.cooldown : 0;
         this.last_prompt_time = 0;
 
@@ -34,6 +35,10 @@ export class Prompter {
             chat = {model: chat};
             if (chat.model.includes('gemini'))
                 chat.api = 'google';
+            else if (chat.model.includes('llama.cpp')){
+                chat.api = 'llama.cpp';
+                chat.url = baseURL;
+            }
             else if (chat.model.includes('gpt') || chat.model.includes('o1'))
                 chat.api = 'openai';
             else if (chat.model.includes('claude'))
@@ -44,8 +49,6 @@ export class Prompter {
                 chat.api = 'replicate';
             else if (chat.model.includes("groq/") || chat.model.includes("groqcloud/"))
                 chat.api = 'groq';
-            else if (chat.model.includes('qwen'))
-                chat.api = 'qwen';
             else
                 chat.api = 'ollama';
         }
@@ -54,6 +57,8 @@ export class Prompter {
 
         if (chat.api === 'google')
             this.chat_model = new Gemini(chat.model, chat.url);
+        else if (chat.api == 'llama.cpp')
+            this.chat_model = new LlamaCpp(chat.model, chat.url);
         else if (chat.api === 'openai')
             this.chat_model = new GPT(chat.model, chat.url);
         else if (chat.api === 'anthropic')
@@ -67,8 +72,6 @@ export class Prompter {
         }
         else if (chat.api === 'huggingface')
             this.chat_model = new HuggingFace(chat.model, chat.url);
-        else if (chat.api === 'qwen')
-            this.chat_model = new Qwen(chat.model, chat.url);
         else
             throw new Error('Unknown API:', api);
 
@@ -84,32 +87,27 @@ export class Prompter {
 
         console.log('Using embedding settings:', embedding);
 
-        try {
-            if (embedding.api === 'google')
-                this.embedding_model = new Gemini(embedding.model, embedding.url);
-            else if (embedding.api === 'openai')
-                this.embedding_model = new GPT(embedding.model, embedding.url);
-            else if (embedding.api === 'replicate')
-                this.embedding_model = new ReplicateAPI(embedding.model, embedding.url);
-            else if (embedding.api === 'ollama')
-                this.embedding_model = new Local(embedding.model, embedding.url);
-            else if (embedding.api === 'qwen')
-                this.embedding_model = new Qwen(embedding.model, embedding.url);
-            else {
-                this.embedding_model = null;
-                console.log('Unknown embedding: ', embedding ? embedding.api : '[NOT SPECIFIED]', '. Using word overlap.');
-            }
+        if (embedding.api === 'google')
+            this.embedding_model = new Gemini(embedding.model, embedding.url);
+        else if (embedding.api === 'llama.cpp') {
+            embedding.url = baseURL;
+            this.embedding_model = new LlamaCpp(embedding.model, embedding.url);
         }
-        catch (err) {
-            console.log('Warning: Failed to initialize embedding model:', err.message);
-            console.log('Continuing anyway, using word overlap instead.');
+        else if (embedding.api === 'openai')
+            this.embedding_model = new GPT(embedding.model, embedding.url);
+        else if (embedding.api === 'replicate')
+            this.embedding_model = new ReplicateAPI(embedding.model, embedding.url);
+        else if (embedding.api === 'ollama')
+            this.embedding_model = new Local(embedding.model, embedding.url);
+        else {
             this.embedding_model = null;
+            console.log('Unknown embedding: ', embedding ? embedding.api : '[NOT SPECIFIED]', '. Using word overlap.');
         }
 
         mkdirSync(`./bots/${name}`, { recursive: true });
         writeFileSync(`./bots/${name}/last_profile.json`, JSON.stringify(this.profile, null, 4), (err) => {
             if (err) {
-                throw new Error('Failed to save profile:', err);
+                throw err;
             }
             console.log("Copy profile saved.");
         });
@@ -124,28 +122,15 @@ export class Prompter {
     }
 
     async initExamples() {
-        try {
-            this.convo_examples = new Examples(this.embedding_model);
-            this.coding_examples = new Examples(this.embedding_model);
-            
-            const [convoResult, codingResult] = await Promise.allSettled([
-                this.convo_examples.load(this.profile.conversation_examples),
-                this.coding_examples.load(this.profile.coding_examples)
-            ]);
-
-            // Handle potential failures
-            if (convoResult.status === 'rejected') {
-                console.error('Failed to load conversation examples:', convoResult.reason);
-                throw convoResult.reason;
-            }
-            if (codingResult.status === 'rejected') {
-                console.error('Failed to load coding examples:', codingResult.reason);
-                throw codingResult.reason;
-            }
-        } catch (error) {
-            console.error('Failed to initialize examples:', error);
-            throw error;
-        }
+        // Using Promise.all to implement concurrent processing
+        // Create Examples instances
+        this.convo_examples = new Examples(this.embedding_model);
+        this.coding_examples = new Examples(this.embedding_model);
+        // Use Promise.all to load examples concurrently
+        await Promise.all([
+            this.convo_examples.load(this.profile.conversation_examples),
+            this.coding_examples.load(this.profile.coding_examples),
+        ]);
     }
 
     async replaceStrings(prompt, messages, examples=null, to_summarize=[], last_goals=null) {
